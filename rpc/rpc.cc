@@ -665,32 +665,46 @@ rpcs::checkduplicate_and_update(unsigned int clt_nonce, unsigned int xid,
 {
     ScopedLock rwl(&reply_window_m_);
 
-    std::list<reply_t>& reply_list = reply_window_[clt_nonce];
-   
-    while (!reply_list.empty() && reply_list.front().xid <= xid_rep) {
-        free(reply_list.front().buf);
-        reply_list.pop_front();
-    }
+    rpcstate_t state = NEW;
 
-    if (xid <= xid_rep || (!reply_list.empty() && reply_list.front().xid > xid))
-        return FORGOTTEN;
+    std::list<reply_t>& reply_list = reply_window_[clt_nonce];
+    if (reply_list.empty())
+        reply_list.push_back(reply_t(0));
+    
 
     std::list<reply_t>::iterator it = reply_list.begin(); 
-    for(; it != reply_list.end(); ++it) {
+    if (xid <= xid_rep || xid <= it->xid) {
+        state = FORGOTTEN;
+        goto clean_reply_window;
+    }
+
+    for(++it; it != reply_list.end(); ++it) {
         if (it->xid < xid) continue;
         if (it->xid == xid) {
             if (it->cb_present) {
                 *b = it->buf;
                 *sz = it->sz;
-                return DONE;
-            } 
-            return INPROGRESS;
+                state = DONE;
+            } else
+                state = INPROGRESS;
+            goto clean_reply_window;
         }
         break;
     }
     reply_list.insert(it, reply_t(xid));
-    
-    return NEW;
+
+clean_reply_window:
+    unsigned int xid_rep_old = reply_list.front().xid;
+    if (xid_rep > xid_rep_old) {
+        reply_list.pop_front();
+        while (!reply_list.empty() && reply_list.front().xid <= xid_rep) {
+            free(reply_list.front().buf);
+            reply_list.pop_front();
+        }
+        reply_list.push_front(reply_t(xid_rep));
+    }
+
+    return state;
 }
 
 // rpcs::dispatch calls add_reply when it is sending a reply to an RPC,
@@ -705,7 +719,7 @@ rpcs::add_reply(unsigned int clt_nonce, unsigned int xid,
     ScopedLock rwl(&reply_window_m_);
     std::list<reply_t>& reply_list = reply_window_[clt_nonce];
     std::list<reply_t>::iterator it = reply_list.begin(); 
-    for(; it != reply_list.end(); ++it) {
+    for(++it; it != reply_list.end(); ++it) {
         if (it->xid == xid) {
             it->cb_present = true;
             it->buf = b;
